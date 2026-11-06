@@ -5,7 +5,7 @@ import time
 import discord
 from discord import app_commands
 
-TOKEN = os.environ["MTU2ODI4NTM4MjUzNjA3NzQ1Mg.GZEUxb.M4QdqLxfOnBJzw2QVivSW31vX-0-4mwluVpGlw"]
+TOKEN = os.environ["DISCORD_TOKEN"]
 DB_PATH = os.environ.get("DB_PATH", "robux.db")
 MESSAGES_PER_ROBUX = int(os.environ.get("MESSAGES_PER_ROBUX", "40"))
 # Anti-spam: a message only counts if this many seconds passed since the last counted one.
