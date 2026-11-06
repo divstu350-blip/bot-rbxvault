@@ -1,4 +1,4 @@
-```python
+python
 import os
 import sqlite3
 import time
@@ -239,4 +239,3 @@ async def leaderboard(interaction: discord.Interaction):
 
 # Start bot
 bot.run(TOKEN)
-```
