@@ -1,3 +1,4 @@
+```python
 import os
 import sqlite3
 import time
@@ -8,18 +9,25 @@ from discord import app_commands
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 DB_PATH = os.environ.get("DB_PATH", "robux.db")
-# Robux earned per counted message (default 0.0125 = 1/80 Robux).
+
+# Robux earned per counted message
 ROBUX_PER_MESSAGE = Decimal(os.environ.get("ROBUX_PER_MESSAGE", "0.0125"))
-# Anti-spam: a message only counts if this many seconds passed since the last counted one.
+
+# Anti-spam cooldown
 COOLDOWN_SECONDS = float(os.environ.get("COOLDOWN_SECONDS", "5"))
 
-# Balances are stored as integers: 1 Robux = 10,000 units. No floating-point errors.
+# Welcome channel
+WELCOME_CHANNEL_ID = 1568330851291504650
+
+# Balance storage
 UNITS_PER_ROBUX = 10_000
 UNITS_PER_MESSAGE = int(ROBUX_PER_MESSAGE * UNITS_PER_ROBUX)
 
 EMBED_COLOR = discord.Color.from_rgb(0, 176, 111)
 
+# Database setup
 db = sqlite3.connect(DB_PATH)
+
 db.execute(
     """
     CREATE TABLE IF NOT EXISTS balances (
@@ -32,7 +40,8 @@ db.execute(
     )
     """
 )
-# One-time migration from the previous version (0.025 Robux per message = 250 units).
+
+# One-time migration from previous version
 try:
     db.execute(
         """
@@ -41,7 +50,8 @@ try:
         """
     )
 except sqlite3.OperationalError:
-    pass  # no old table, nothing to migrate
+    pass
+
 db.commit()
 
 
@@ -51,12 +61,15 @@ def fmt(units: int) -> str:
 
 def register_message(guild_id: int, user_id: int) -> None:
     now = time.time()
+
     row = db.execute(
         "SELECT last_count FROM balances WHERE guild_id=? AND user_id=?",
         (guild_id, user_id),
     ).fetchone()
+
     if row and now - row[0] < COOLDOWN_SECONDS:
         return
+
     db.execute(
         """
         INSERT INTO balances (guild_id, user_id, units, msgs, last_count)
@@ -68,17 +81,24 @@ def register_message(guild_id: int, user_id: int) -> None:
         """,
         (guild_id, user_id, UNITS_PER_MESSAGE, now),
     )
+
     db.commit()
 
 
 def progress_bar(units: int, length: int = 10) -> str:
-    filled = int((units % UNITS_PER_ROBUX) / UNITS_PER_ROBUX * length)
+    filled = int(
+        (units % UNITS_PER_ROBUX) / UNITS_PER_ROBUX * length
+    )
     return "▰" * filled + "▱" * (length - filled)
 
 
 class RobuxBot(discord.Client):
     def __init__(self):
-        intents = discord.Intents.default()  # no privileged intents needed
+        intents = discord.Intents.default()
+
+        # Required for welcome messages
+        intents.members = True
+
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -94,55 +114,129 @@ async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
+# Welcome message when someone joins
+@bot.event
+async def on_member_join(member: discord.Member):
+    channel = bot.get_channel(WELCOME_CHANNEL_ID)
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(WELCOME_CHANNEL_ID)
+        except discord.NotFound:
+            print("Welcome channel not found.")
+            return
+        except discord.Forbidden:
+            print("Bot does not have permission to access welcome channel.")
+            return
+
+    await channel.send(
+        f"Hey {member.mention}, welcome to rbxVault!\n\n"
+        "Explore all the channels for current giveaways!"
+    )
+
+
+# Count messages for Robux
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
+
     register_message(message.guild.id, message.author.id)
 
 
-@bot.tree.command(name="balance", description="Check your (or someone's) Robux balance")
+# Balance command
+@bot.tree.command(
+    name="balance",
+    description="Check your (or someone's) Robux balance"
+)
 @app_commands.describe(user="User to check (defaults to you)")
-async def balance(interaction: discord.Interaction, user: discord.Member | None = None):
+async def balance(
+    interaction: discord.Interaction,
+    user: discord.Member | None = None
+):
     user = user or interaction.user
+
     row = db.execute(
         "SELECT units, msgs FROM balances WHERE guild_id=? AND user_id=?",
         (interaction.guild_id, user.id),
     ).fetchone()
+
     units, msgs = row if row else (0, 0)
 
-    embed = discord.Embed(title=f"{user.display_name}'s Wallet", color=EMBED_COLOR)
+    embed = discord.Embed(
+        title=f"{user.display_name}'s Wallet",
+        color=EMBED_COLOR
+    )
+
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="Balance", value=f"**{fmt(units)}** Robux", inline=True)
-    embed.add_field(name="Messages counted", value=f"{msgs:,}", inline=True)
+
+    embed.add_field(
+        name="Balance",
+        value=f"**{fmt(units)}** Robux",
+        inline=True
+    )
+
+    embed.add_field(
+        name="Messages counted",
+        value=f"{msgs:,}",
+        inline=True
+    )
+
     embed.add_field(
         name="Progress to next whole Robux",
         value=f"{progress_bar(units)}  {(units % UNITS_PER_ROBUX) / UNITS_PER_ROBUX:.0%}",
-        inline=False,
+        inline=False
     )
-    embed.set_footer(text=f"Earn {ROBUX_PER_MESSAGE} Robux per message")
+
+    embed.set_footer(
+        text=f"Earn {ROBUX_PER_MESSAGE} Robux per message"
+    )
+
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="leaderboard", description="Top Robux earners in this server")
+# Leaderboard command
+@bot.tree.command(
+    name="leaderboard",
+    description="Top Robux earners in this server"
+)
 async def leaderboard(interaction: discord.Interaction):
     rows = db.execute(
-        "SELECT user_id, units FROM balances WHERE guild_id=? ORDER BY units DESC LIMIT 10",
+        """
+        SELECT user_id, units
+        FROM balances
+        WHERE guild_id=?
+        ORDER BY units DESC
+        LIMIT 10
+        """,
         (interaction.guild_id,),
     ).fetchall()
 
-    embed = discord.Embed(title="Robux Leaderboard", color=EMBED_COLOR)
+    embed = discord.Embed(
+        title="Robux Leaderboard",
+        color=EMBED_COLOR
+    )
+
     if not rows:
         embed.description = "Nobody has earned anything yet. Start chatting!"
+
     else:
         medals = ["🥇", "🥈", "🥉"]
+
         lines = [
             f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{uid}> — **{fmt(u)}** Robux"
             for i, (uid, u) in enumerate(rows)
         ]
+
         embed.description = "\n".join(lines)
-    embed.set_footer(text=f"Earn {ROBUX_PER_MESSAGE} Robux per message")
+
+    embed.set_footer(
+        text=f"Earn {ROBUX_PER_MESSAGE} Robux per message"
+    )
+
     await interaction.response.send_message(embed=embed)
 
 
+# Start bot
 bot.run(TOKEN)
+```
