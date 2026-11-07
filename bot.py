@@ -246,7 +246,6 @@ async def dm(
 
     await interaction.response.send_message(
         f"Sent to {user.mention}: **{title}** Deadline: <t:{ts}:F> (<t:{ts}:R>).",
-        ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
