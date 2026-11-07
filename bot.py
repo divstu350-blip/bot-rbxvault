@@ -116,7 +116,8 @@ class RobuxBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        await self.tree.sync()
+        synced = await self.tree.sync()
+        print(f"[startup] Synced commands: {[c.name for c in synced]}")
 
 
 bot = RobuxBot()
