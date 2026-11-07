@@ -1,6 +1,8 @@
 import os
+import re
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import discord
@@ -14,10 +16,15 @@ DB_PATH = os.environ.get("DB_PATH") or os.path.join(
 print(f"[startup] Database path: {os.path.abspath(DB_PATH)}")
 print(f"[startup] Volume mount path: {os.environ.get('RAILWAY_VOLUME_MOUNT_PATH')}")
 print(f"[startup] Database file already exists: {os.path.exists(DB_PATH)}")
+
 # Robux earned per counted message (default 0.0125 = 1/80 Robux).
 ROBUX_PER_MESSAGE = Decimal(os.environ.get("ROBUX_PER_MESSAGE", "0.0125"))
 # Anti-spam: a message only counts if this many seconds passed since the last counted one.
 COOLDOWN_SECONDS = float(os.environ.get("COOLDOWN_SECONDS", "5"))
+# Timezone used when staff type an exact deadline like "2026-11-08 02:35" (default IST, UTC+5:30).
+# Discord shows the final timestamp in each user's own timezone automatically.
+UTC_OFFSET_MINUTES = int(os.environ.get("UTC_OFFSET_MINUTES", "330"))
+LOCAL_TZ = timezone(timedelta(minutes=UTC_OFFSET_MINUTES))
 
 # Balances are stored as integers: 1 Robux = 10,000 units. No floating-point errors.
 UNITS_PER_ROBUX = 10_000
@@ -82,10 +89,29 @@ def progress_bar(units: int, length: int = 10) -> str:
     return "▰" * filled + "▱" * (length - filled)
 
 
+def parse_deadline(text: str) -> datetime | None:
+    """Accepts a duration ("18h", "2d 6h", "30m") or an exact time ("2026-11-08 02:35")."""
+    text = text.strip().lower()
+
+    m = re.fullmatch(r"(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?", text)
+    if m and any(m.groups()):
+        days, hours, minutes = (int(x or 0) for x in m.groups())
+        delta = timedelta(days=days, hours=hours, minutes=minutes)
+        if delta.total_seconds() <= 0:
+            return None
+        return datetime.now(timezone.utc) + delta
+
+    for pattern in ("%Y-%m-%d %H:%M", "%d-%m-%Y %H:%M"):
+        try:
+            return datetime.strptime(text, pattern).replace(tzinfo=LOCAL_TZ)
+        except ValueError:
+            continue
+    return None
+
+
 class RobuxBot(discord.Client):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.members = True  # privileged intent: needed to detect new members joining
+        intents = discord.Intents.default()  # no privileged intents needed
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -106,36 +132,6 @@ async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
     register_message(message.guild.id, message.author.id)
-
-
-WELCOME_CHANNEL_ID = int(os.environ.get("WELCOME_CHANNEL_ID", "1568330851291504650"))
-
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    if member.bot:
-        return
-    channel = bot.get_channel(WELCOME_CHANNEL_ID)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(WELCOME_CHANNEL_ID)
-        except discord.HTTPException:
-            print(f"[welcome] Could not find channel {WELCOME_CHANNEL_ID}")
-            return
-
-    embed = discord.Embed(
-        description=(
-            f"Hey {member.mention}, welcome to **rbxVault**!\n\n"
-            "Explore all the channels for current giveaways!"
-        ),
-        color=EMBED_COLOR,
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    try:
-        # Mention in the message text so the new member actually gets pinged.
-        await channel.send(content=member.mention, embed=embed)
-    except discord.HTTPException as e:
-        print(f"[welcome] Failed to send welcome message: {e}")
 
 
 @bot.tree.command(name="balance", description="Check your (or someone's) Robux balance")
@@ -180,6 +176,78 @@ async def leaderboard(interaction: discord.Interaction):
         embed.description = "\n".join(lines)
     embed.set_footer(text=f"Earn {ROBUX_PER_MESSAGE} Robux per message")
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="dm", description="DM a giveaway winner with their claim deadline")
+@app_commands.describe(
+    user="The winner",
+    deadline="Claim deadline: a duration like 18h, 2d 6h, 30m, or an exact time like 2026-11-08 02:35",
+    prize="What they won, e.g. 5 Robux (optional)",
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def dm(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    deadline: str,
+    prize: app_commands.Range[str, 1, 100] | None = None,
+):
+    # Extra safety on top of the default permission, in case server settings changed it.
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "You need the Manage Server permission to use this.", ephemeral=True
+        )
+        return
+
+    if user.bot:
+        await interaction.response.send_message("You can't DM a bot.", ephemeral=True)
+        return
+
+    deadline_dt = parse_deadline(deadline)
+    if deadline_dt is None:
+        await interaction.response.send_message(
+            "I couldn't understand that deadline. Use a duration like `18h`, `2d 6h` or `30m`, "
+            "or an exact time like `2026-11-08 02:35`.",
+            ephemeral=True,
+        )
+        return
+    if deadline_dt <= datetime.now(timezone.utc):
+        await interaction.response.send_message(
+            "That deadline is in the past.", ephemeral=True
+        )
+        return
+
+    ts = int(deadline_dt.timestamp())
+    title = f"You won {prize.strip()}!" if prize and prize.strip() else "You won a giveaway!"
+
+    embed = discord.Embed(
+        title=title,
+        description=(
+            f"⏰ **Your personal claim deadline:** <t:{ts}:F> · <t:{ts}:R>\n\n"
+            "🎫 Open a **Giveaway Claims** support ticket before your deadline. "
+            "Once claimed on time, staff can deliver your prize afterward.\n\n"
+            "⚠️ Never send passwords, cookies, 2FA codes or account tokens."
+        ),
+        color=EMBED_COLOR,
+    )
+
+    try:
+        await user.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"I couldn't DM {user.mention}. They probably have DMs from server members turned off.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Failed to send the DM: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Sent to {user.mention}: **{title}** Deadline: <t:{ts}:F> (<t:{ts}:R>).",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 bot.run(TOKEN)
