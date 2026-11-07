@@ -250,4 +250,64 @@ async def dm(
     )
 
 
+VERIFY_CHANNEL_URL = os.environ.get(
+    "VERIFY_CHANNEL_URL",
+    "https://discord.com/channels/1262760206597750876/1568322291971002428",
+)
+
+
+@bot.tree.command(
+    name="notifyverify",
+    description="DM a member to verify their Roblox account through Bloxlink",
+)
+@app_commands.describe(user="The member to remind")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def notifyverify(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "You need the Manage Server permission to use this.", ephemeral=True
+        )
+        return
+
+    if user.bot:
+        await interaction.response.send_message("You can't DM a bot.", ephemeral=True)
+        return
+
+    server_name = interaction.guild.name
+    embed = discord.Embed(
+        title="Verify your Roblox account",
+        description=(
+            f"Hey {user.display_name}! To get access to the rest of **{server_name}**, "
+            "you need to verify your Roblox account through **Bloxlink**.\n\n"
+            "🔗 Press the button below, then follow the steps in the verification channel.\n\n"
+            "⚠️ Never send passwords, cookies, 2FA codes or account tokens to anyone."
+        ),
+        color=EMBED_COLOR,
+    )
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(
+            label="Verify now", style=discord.ButtonStyle.link, url=VERIFY_CHANNEL_URL
+        )
+    )
+
+    try:
+        await user.send(embed=embed, view=view)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"I couldn't DM {user.mention}. They probably have DMs from server members turned off.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Failed to send the DM: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Sent a verification reminder to {user.mention}.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 bot.run(TOKEN)
