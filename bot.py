@@ -310,4 +310,91 @@ async def notifyverify(interaction: discord.Interaction, user: discord.Member):
     )
 
 
+@bot.tree.command(name="notify", description="DM a member about a giveaway")
+@app_commands.describe(
+    user="The member to notify",
+    prize="What the giveaway is for, e.g. 5 Robux",
+    message_id="The ID of the giveaway message",
+    channel="Channel the giveaway is in (defaults to the current channel)",
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def notify(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    prize: app_commands.Range[str, 1, 100],
+    message_id: str,
+    channel: discord.TextChannel | None = None,
+):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "You need the Manage Server permission to use this.", ephemeral=True
+        )
+        return
+
+    if user.bot:
+        await interaction.response.send_message("You can't DM a bot.", ephemeral=True)
+        return
+
+    message_id = message_id.strip()
+    if not message_id.isdigit():
+        await interaction.response.send_message(
+            "That message ID isn't valid. It should be a long number "
+            "(right-click the giveaway message -> Copy Message ID).",
+            ephemeral=True,
+        )
+        return
+
+    channel_id = channel.id if channel else interaction.channel_id
+
+    # Check the giveaway message really exists in that channel (skipped if I can't read it).
+    target = channel or interaction.channel
+    try:
+        await target.fetch_message(int(message_id))
+    except discord.NotFound:
+        await interaction.response.send_message(
+            "I couldn't find that message in "
+            f"{target.mention}. Check the message ID, or pick the right channel.",
+            ephemeral=True,
+        )
+        return
+    except (discord.Forbidden, discord.HTTPException, AttributeError):
+        pass
+
+    url = f"https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}"
+    prize = prize.strip()
+
+    embed = discord.Embed(
+        title=f"🎁 Giveaway: {prize}",
+        description=(
+            f"Hey {user.display_name}! There's a giveaway for **{prize}** "
+            f"in **{interaction.guild.name}**.\n\n"
+            "Press the button below to jump to the giveaway and enter.\n\n"
+            "⚠️ Never send passwords, cookies, 2FA codes or account tokens."
+        ),
+        color=EMBED_COLOR,
+    )
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(label="Go to giveaway", style=discord.ButtonStyle.link, url=url)
+    )
+
+    try:
+        await user.send(embed=embed, view=view)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"I couldn't DM {user.mention}. They probably have DMs from server members turned off.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Failed to send the DM: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Notified {user.mention} about the **{prize}** giveaway.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 bot.run(TOKEN)
