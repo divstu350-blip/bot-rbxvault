@@ -45,6 +45,19 @@ db.execute(
     )
     """
 )
+# Log of every time an admin resets a balance after a redemption.
+db.execute(
+    """
+    CREATE TABLE IF NOT EXISTS redemptions (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id   INTEGER NOT NULL,
+        user_id    INTEGER NOT NULL,
+        units      INTEGER NOT NULL,
+        admin_id   INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    )
+    """
+)
 # One-time migration from the previous version (0.025 Robux per message = 250 units).
 try:
     db.execute(
@@ -484,6 +497,237 @@ async def message_cmd(
         f"Sent a DM to {user.mention}.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
+
+
+class ConfirmReset(discord.ui.View):
+    def __init__(self, admin_id: int, guild_id: int, target: discord.Member):
+        super().__init__(timeout=60)
+        self.admin_id = admin_id
+        self.guild_id = guild_id
+        self.target = target
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.admin_id:
+            await interaction.response.send_message(
+                "Only the admin who ran this command can confirm it.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm reset", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        row = db.execute(
+            "SELECT units FROM balances WHERE guild_id=? AND user_id=?",
+            (self.guild_id, self.target.id),
+        ).fetchone()
+        units = row[0] if row else 0
+        if units <= 0:
+            self.stop()
+            await interaction.response.edit_message(
+                content=f"{self.target.display_name} has no balance to reset.", view=None
+            )
+            return
+
+        db.execute(
+            "INSERT INTO redemptions (guild_id, user_id, units, admin_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (self.guild_id, self.target.id, units, interaction.user.id, int(time.time())),
+        )
+        db.execute(
+            "UPDATE balances SET units = 0 WHERE guild_id=? AND user_id=?",
+            (self.guild_id, self.target.id),
+        )
+        db.commit()
+        self.stop()
+        await interaction.response.edit_message(content="Done.", view=None)
+
+        public_text = f"Reset {self.target.mention}'s balance. Redeemed: **{fmt(units)} Robux**."
+        no_ping = discord.AllowedMentions.none()
+        try:
+            await interaction.channel.send(public_text, allowed_mentions=no_ping)
+        except discord.HTTPException:
+            await interaction.followup.send(public_text, allowed_mentions=no_ping)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. Nothing was changed.", view=None)
+
+
+@bot.tree.command(name="reset", description="Reset a member's Robux balance after they redeem it")
+@app_commands.describe(user="The member who redeemed their Robux")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def reset(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "Only admins can use this command.", ephemeral=True
+        )
+        return
+
+    row = db.execute(
+        "SELECT units FROM balances WHERE guild_id=? AND user_id=?",
+        (interaction.guild_id, user.id),
+    ).fetchone()
+    units = row[0] if row else 0
+    if units <= 0:
+        await interaction.response.send_message(
+            f"{user.display_name} has no balance to reset.", ephemeral=True
+        )
+        return
+
+    view = ConfirmReset(interaction.user.id, interaction.guild_id, user)
+    await interaction.response.send_message(
+        f"Reset **{user.display_name}**'s balance of **{fmt(units)} Robux** to 0 "
+        "and log it as redeemed? This can't be undone.",
+        view=view,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="transactions", description="Show how many times Robux were redeemed (resets)")
+@app_commands.describe(user="Only show redemptions for this member (optional)")
+@app_commands.guild_only()
+async def transactions(interaction: discord.Interaction, user: discord.Member | None = None):
+    where = "guild_id=?"
+    params: list = [interaction.guild_id]
+    if user:
+        where += " AND user_id=?"
+        params.append(user.id)
+
+    count, total = db.execute(
+        f"SELECT COUNT(*), COALESCE(SUM(units), 0) FROM redemptions WHERE {where}", params
+    ).fetchone()
+    recent = db.execute(
+        f"SELECT user_id, units, admin_id, created_at FROM redemptions WHERE {where} "
+        "ORDER BY id DESC LIMIT 10",
+        params,
+    ).fetchall()
+
+    title = f"Redemptions for {user.display_name}" if user else "Redemptions"
+    embed = discord.Embed(title=title, color=EMBED_COLOR)
+    embed.add_field(name="Times redeemed", value=f"**{count:,}**", inline=True)
+    embed.add_field(name="Total redeemed", value=f"**{fmt(total)}** Robux", inline=True)
+    if recent:
+        lines = [
+            f"<@{uid}> — **{fmt(u)}** Robux · <t:{ts}:R> · by <@{aid}>"
+            for uid, u, aid, ts in recent
+        ]
+        embed.add_field(name="Most recent", value="\n".join(lines), inline=False)
+    else:
+        embed.description = "No redemptions recorded yet."
+    await interaction.response.send_message(embed=embed)
+
+
+PAY_PAGE_SIZE = 10
+
+
+def build_pay_embed(guild_id: int, page: int) -> tuple[discord.Embed, int, int]:
+    """Returns (embed, total_pages, clamped_page)."""
+    total_units, members = db.execute(
+        "SELECT COALESCE(SUM(units), 0), COUNT(*) FROM balances WHERE guild_id=? AND units > 0",
+        (guild_id,),
+    ).fetchone()
+    pages = max(1, (members + PAY_PAGE_SIZE - 1) // PAY_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    offset = page * PAY_PAGE_SIZE
+
+    rows = db.execute(
+        "SELECT user_id, units FROM balances WHERE guild_id=? AND units > 0 "
+        "ORDER BY units DESC, user_id LIMIT ? OFFSET ?",
+        (guild_id, PAY_PAGE_SIZE, offset),
+    ).fetchall()
+
+    description = (
+        f"**Total to pay: {fmt(total_units)} Robux**\n"
+        f"Across **{members:,}** member{'s' if members != 1 else ''}"
+    )
+    if rows:
+        lines = [
+            f"`{offset + i + 1}.` <@{uid}> — **{fmt(u)}** Robux"
+            for i, (uid, u) in enumerate(rows)
+        ]
+        description += "\n\n" + "\n".join(lines)
+    else:
+        description += "\n\nNobody is owed anything right now."
+
+    embed = discord.Embed(title="Robux to Pay", description=description, color=EMBED_COLOR)
+    embed.set_footer(text=f"Page {page + 1}/{pages}")
+    return embed, pages, page
+
+
+class PayView(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction, page: int, pages: int):
+        super().__init__(timeout=180)
+        self.origin = interaction
+        self.admin_id = interaction.user.id
+        self.guild_id = interaction.guild_id
+        self.page = page
+        self.pages = pages
+        self.sync_buttons()
+
+    def sync_buttons(self):
+        self.prev_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= self.pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.admin_id:
+            await interaction.response.send_message(
+                "Only the admin who ran this command can change pages. Run `/to pay` yourself.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def refresh(self, interaction: discord.Interaction):
+        embed, self.pages, self.page = build_pay_embed(self.guild_id, self.page)
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="◀ Back", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        await self.refresh(interaction)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.origin.edit_original_response(view=self)
+        except discord.HTTPException:
+            pass
+
+
+to_group = app_commands.Group(
+    name="to",
+    description="Payout tools",
+    default_permissions=discord.Permissions(administrator=True),
+    guild_only=True,
+)
+
+
+@to_group.command(name="pay", description="Show how much Robux needs to be paid to members")
+async def to_pay(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "Only admins can use this command.", ephemeral=True
+        )
+        return
+
+    embed, pages, page = build_pay_embed(interaction.guild_id, 0)
+    if pages > 1:
+        await interaction.response.send_message(
+            embed=embed, view=PayView(interaction, page, pages)
+        )
+    else:
+        await interaction.response.send_message(embed=embed)
+
+
+bot.tree.add_command(to_group)
 
 
 bot.run(TOKEN)
