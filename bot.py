@@ -397,4 +397,56 @@ async def notify(
     )
 
 
+@bot.tree.command(name="message", description="DM a member with a custom message")
+@app_commands.describe(
+    user="The member to message",
+    message="What to say (type \\n for a new line)",
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def message_cmd(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    message: app_commands.Range[str, 1, 2000],
+):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "You need the Manage Server permission to use this.", ephemeral=True
+        )
+        return
+
+    if user.bot:
+        await interaction.response.send_message("You can't DM a bot.", ephemeral=True)
+        return
+
+    text = message.replace("\\n", "\n").strip()
+    if not text:
+        await interaction.response.send_message("The message can't be empty.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"Message from {interaction.guild.name}",
+        description=text,
+        color=EMBED_COLOR,
+    )
+    embed.set_footer(text=f"Sent by the {interaction.guild.name} staff team")
+
+    try:
+        await user.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"I couldn't DM {user.mention}. They probably have DMs from server members turned off.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Failed to send the DM: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Sent a DM to {user.mention}.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 bot.run(TOKEN)
