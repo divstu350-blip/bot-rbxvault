@@ -111,7 +111,8 @@ def parse_deadline(text: str) -> datetime | None:
 
 class RobuxBot(discord.Client):
     def __init__(self):
-        intents = discord.Intents.default()  # no privileged intents needed
+        intents = discord.Intents.default()
+        intents.members = True  # privileged intent: needed to detect new members joining
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -133,6 +134,42 @@ async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
     register_message(message.guild.id, message.author.id)
+
+
+WELCOME_CHANNEL_ID = int(os.environ.get("WELCOME_CHANNEL_ID", "1568330851291504650"))
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    if member.bot:
+        return
+    channel = bot.get_channel(WELCOME_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(WELCOME_CHANNEL_ID)
+        except discord.HTTPException:
+            print(f"[welcome] Could not find channel {WELCOME_CHANNEL_ID}")
+            return
+
+    embed = discord.Embed(
+        description=(
+            f"Hey {member.mention}, welcome to **rbxVault**!\n"
+            "Make sure you verify to gain access to all the channels!"
+        ),
+        color=EMBED_COLOR,
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(
+            label="Verify now", style=discord.ButtonStyle.link, url=VERIFY_CHANNEL_URL
+        )
+    )
+    try:
+        # Mention in the message text so the new member actually gets pinged.
+        await channel.send(content=member.mention, embed=embed, view=view)
+    except discord.HTTPException as e:
+        print(f"[welcome] Failed to send welcome message: {e}")
 
 
 @bot.tree.command(name="balance", description="Check your (or someone's) Robux balance")
