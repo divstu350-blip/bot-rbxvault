@@ -850,7 +850,7 @@ def add_units(guild_id: int, user_id: int, units: int) -> None:
 async def add(
     interaction: discord.Interaction,
     user: discord.Member,
-    amount: app_commands.Range[float, 0.0001, 1_000_000],
+    amount: app_commands.Range[float, 0.0001, 1_000_000.0],
 ):
     if interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message(
@@ -903,7 +903,7 @@ async def transfer(
     interaction: discord.Interaction,
     from_user: discord.Member,
     to_user: discord.Member,
-    amount: app_commands.Range[float, 0.0001, 1_000_000],
+    amount: app_commands.Range[float, 0.0001, 1_000_000.0],
 ):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message(
