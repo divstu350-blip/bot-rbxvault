@@ -136,6 +136,63 @@ class RobuxBot(discord.Client):
 
 bot = RobuxBot()
 
+# Where each command's usage is logged. To change a log channel, change its ID here.
+_STAFF_LOG = 1568903531996516372
+LOG_CHANNELS = {
+    "transfer": 1568902628899819580,
+    "reset": 1568902965375541308,
+    "notify": _STAFF_LOG,
+    "notifyverify": _STAFF_LOG,
+    "dm": _STAFF_LOG,
+    "message": _STAFF_LOG,
+    "to pay": _STAFF_LOG,
+    "add": 1568904532040224830,
+    "balance": 1568903721906077756,
+    "leaderboard": 1568904931623051275,
+    "transactions": 1568905214272995408,
+}
+
+
+async def log_use(interaction: discord.Interaction, command: str, details: str | None = None):
+    """Posts an embed to the command's log channel. Never raises, so it can't break a command."""
+    channel_id = LOG_CHANNELS.get(command)
+    if channel_id is None:
+        return
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        embed = discord.Embed(
+            title=f"/{command} used",
+            color=EMBED_COLOR,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name="Used by",
+            value=f"{interaction.user.mention} (`{interaction.user.id}`)",
+            inline=True,
+        )
+        where = getattr(interaction.channel, "mention", None) or "Unknown"
+        embed.add_field(name="In", value=where, inline=True)
+        if details:
+            embed.add_field(name="Details", value=details[:1024], inline=False)
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except (discord.HTTPException, AttributeError) as e:
+        print(f"[log] Could not log /{command}: {e}")
+
+
+async def dm_user(member: discord.Member, title: str, description: str) -> bool:
+    """DMs a member an embed. Returns False if they have DMs closed."""
+    embed = discord.Embed(title=title, description=description, color=EMBED_COLOR)
+    embed.set_footer(text=member.guild.name)
+    try:
+        await member.send(embed=embed)
+        return True
+    except discord.HTTPException:
+        return False
+
+
+def yes_no(value: bool) -> str:
+    return "yes" if value else "no (DMs closed)"
+
 
 @bot.event
 async def on_ready():
@@ -206,6 +263,7 @@ async def balance(interaction: discord.Interaction, user: discord.Member | None 
     )
     embed.set_footer(text=f"Earn {ROBUX_PER_MESSAGE} Robux per message")
     await interaction.response.send_message(embed=embed)
+    await log_use(interaction, "balance", f"Checked {user.mention}'s balance")
 
 
 @bot.tree.command(name="leaderboard", description="Top Robux earners in this server")
@@ -227,6 +285,7 @@ async def leaderboard(interaction: discord.Interaction):
         embed.description = "\n".join(lines)
     embed.set_footer(text=f"Earn {ROBUX_PER_MESSAGE} Robux per message")
     await interaction.response.send_message(embed=embed)
+    await log_use(interaction, "leaderboard", "Viewed the leaderboard")
 
 
 @bot.tree.command(name="dm", description="DM a giveaway winner with their claim deadline")
@@ -298,6 +357,9 @@ async def dm(
         f"Sent to {user.mention}: **{title}** Deadline: <t:{ts}:F> (<t:{ts}:R>).",
         allowed_mentions=discord.AllowedMentions.none(),
     )
+    await log_use(
+        interaction, "dm", f"To {user.mention}\n{title}\nDeadline: <t:{ts}:F> (<t:{ts}:R>)"
+    )
 
 
 VERIFY_CHANNEL_URL = os.environ.get(
@@ -358,6 +420,7 @@ async def notifyverify(interaction: discord.Interaction, user: discord.Member):
         f"Sent a verification reminder to {user.mention}.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
+    await log_use(interaction, "notifyverify", f"Sent a verification reminder to {user.mention}")
 
 
 @bot.tree.command(name="notify", description="DM a member about a giveaway")
@@ -445,6 +508,9 @@ async def notify(
         f"Notified {user.mention} about the **{prize}** giveaway.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
+    await log_use(
+        interaction, "notify", f"To {user.mention}\nGiveaway: {prize}\n[Giveaway message]({url})"
+    )
 
 
 @bot.tree.command(name="message", description="DM a member with a custom message")
@@ -497,6 +563,7 @@ async def message_cmd(
         f"Sent a DM to {user.mention}.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
+    await log_use(interaction, "message", f"To {user.mention}\n>>> {text[:900]}")
 
 
 class ConfirmReset(discord.ui.View):
@@ -546,6 +613,19 @@ class ConfirmReset(discord.ui.View):
             await interaction.channel.send(public_text, allowed_mentions=no_ping)
         except discord.HTTPException:
             await interaction.followup.send(public_text, allowed_mentions=no_ping)
+
+        dmed = await dm_user(
+            self.target,
+            "Your Robux were redeemed",
+            f"Your balance of **{fmt(units)} Robux** was marked as redeemed and reset to 0 "
+            f"in **{self.target.guild.name}**.",
+        )
+        await log_use(
+            interaction,
+            "reset",
+            f"Reset {self.target.mention}: **{fmt(units)} Robux** redeemed.\n"
+            f"DM sent: {yes_no(dmed)}",
+        )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -616,6 +696,11 @@ async def transactions(interaction: discord.Interaction, user: discord.Member | 
     else:
         embed.description = "No redemptions recorded yet."
     await interaction.response.send_message(embed=embed)
+    await log_use(
+        interaction,
+        "transactions",
+        f"Viewed redemptions for {user.mention}" if user else "Viewed all redemptions",
+    )
 
 
 PAY_PAGE_SIZE = 10
@@ -725,9 +810,168 @@ async def to_pay(interaction: discord.Interaction):
         )
     else:
         await interaction.response.send_message(embed=embed)
+    await log_use(interaction, "to pay", "Viewed the payout list")
 
 
 bot.tree.add_command(to_group)
+
+
+def parse_robux(amount: float) -> int | None:
+    """Converts a Robux amount to integer units. Returns None if it has more than 4 decimals."""
+    units = Decimal(str(amount)) * UNITS_PER_ROBUX
+    if units != units.to_integral_value():
+        return None
+    units = int(units)
+    return units if units > 0 else None
+
+
+def get_units(guild_id: int, user_id: int) -> int:
+    row = db.execute(
+        "SELECT units FROM balances WHERE guild_id=? AND user_id=?", (guild_id, user_id)
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def add_units(guild_id: int, user_id: int, units: int) -> None:
+    db.execute(
+        """
+        INSERT INTO balances (guild_id, user_id, units, msgs, last_count)
+        VALUES (?, ?, ?, 0, 0)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET units = units + excluded.units
+        """,
+        (guild_id, user_id, units),
+    )
+
+
+@bot.tree.command(name="add", description="Add Robux to a member's balance (server owner only)")
+@app_commands.describe(user="The member to give Robux to", amount="Amount of Robux (up to 4 decimals)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def add(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    amount: app_commands.Range[float, 0.0001, 1_000_000],
+):
+    if interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message(
+            "Only the server owner can use this command.", ephemeral=True
+        )
+        return
+    if user.bot:
+        await interaction.response.send_message("Bots can't hold a balance.", ephemeral=True)
+        return
+
+    units = parse_robux(amount)
+    if units is None:
+        await interaction.response.send_message(
+            "Please use an amount with at most 4 decimal places (e.g. 5 or 0.0125).",
+            ephemeral=True,
+        )
+        return
+
+    add_units(interaction.guild_id, user.id, units)
+    db.commit()
+    new_balance = get_units(interaction.guild_id, user.id)
+    await interaction.response.send_message(
+        f"Added **{fmt(units)} Robux** to {user.mention}. New balance: **{fmt(new_balance)} Robux**.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    dmed = await dm_user(
+        user,
+        "Robux added",
+        f"**{fmt(units)} Robux** were added to your balance in **{interaction.guild.name}**.\n"
+        f"New balance: **{fmt(new_balance)} Robux**.",
+    )
+    await log_use(
+        interaction,
+        "add",
+        f"Added **{fmt(units)} Robux** to {user.mention} (new balance **{fmt(new_balance)}**).\n"
+        f"DM sent: {yes_no(dmed)}",
+    )
+
+
+@bot.tree.command(name="transfer", description="Move Robux from one member's balance to another")
+@app_commands.rename(from_user="from", to_user="to")
+@app_commands.describe(
+    from_user="The member to take Robux from",
+    to_user="The member to give Robux to",
+    amount="Amount of Robux (up to 4 decimals)",
+)
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def transfer(
+    interaction: discord.Interaction,
+    from_user: discord.Member,
+    to_user: discord.Member,
+    amount: app_commands.Range[float, 0.0001, 1_000_000],
+):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "Only admins can use this command.", ephemeral=True
+        )
+        return
+    if from_user.id == to_user.id:
+        await interaction.response.send_message(
+            "Pick two different members.", ephemeral=True
+        )
+        return
+    if from_user.bot or to_user.bot:
+        await interaction.response.send_message("Bots can't hold a balance.", ephemeral=True)
+        return
+
+    units = parse_robux(amount)
+    if units is None:
+        await interaction.response.send_message(
+            "Please use an amount with at most 4 decimal places (e.g. 5 or 0.0125).",
+            ephemeral=True,
+        )
+        return
+
+    have = get_units(interaction.guild_id, from_user.id)
+    if have < units:
+        await interaction.response.send_message(
+            f"{from_user.display_name} only has **{fmt(have)} Robux**, "
+            f"so I can't move {fmt(units)}.",
+            ephemeral=True,
+        )
+        return
+
+    db.execute(
+        "UPDATE balances SET units = units - ? WHERE guild_id=? AND user_id=?",
+        (units, interaction.guild_id, from_user.id),
+    )
+    add_units(interaction.guild_id, to_user.id, units)
+    db.commit()
+
+    from_balance = get_units(interaction.guild_id, from_user.id)
+    to_balance = get_units(interaction.guild_id, to_user.id)
+    await interaction.response.send_message(
+        f"Transferred **{fmt(units)} Robux** from {from_user.mention} to {to_user.mention}.\n"
+        f"{from_user.display_name}: **{fmt(from_balance)}** · "
+        f"{to_user.display_name}: **{fmt(to_balance)}**",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    server = interaction.guild.name
+    sender_dm = await dm_user(
+        from_user,
+        "Robux transferred",
+        f"**{fmt(units)} Robux** were moved from your balance to {to_user.display_name} "
+        f"in **{server}**.\nYour new balance: **{fmt(from_balance)} Robux**.",
+    )
+    receiver_dm = await dm_user(
+        to_user,
+        "Robux received",
+        f"You received **{fmt(units)} Robux** from {from_user.display_name} "
+        f"in **{server}**.\nYour new balance: **{fmt(to_balance)} Robux**.",
+    )
+    await log_use(
+        interaction,
+        "transfer",
+        f"**{fmt(units)} Robux**: {from_user.mention} → {to_user.mention}\n"
+        f"New balances: {fmt(from_balance)} / {fmt(to_balance)}\n"
+        f"DMs sent: sender {yes_no(sender_dm)}, receiver {yes_no(receiver_dm)}",
+    )
 
 
 bot.run(TOKEN)
